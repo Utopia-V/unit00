@@ -1,0 +1,13 @@
+[package]
+name = "unit00"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "unit00"
+path = "src/main.rs"
+test = false
+bench = false
+
