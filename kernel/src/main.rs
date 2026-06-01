@@ -7,10 +7,10 @@ mod sbi;
 mod timer;
 mod trap;
 
+use crate::mm::page_table::{PTEFlags, PhysAddr, VirtAddr, init_kernel};
+use crate::timer::{read_time, set_timer};
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
-use crate::mm::page_table::{PhysAddr, VirtAddr, PTEFlags, init_kernel};
-use crate::timer::{read_time, set_timer};
 
 static mut NEXT_FRAME: usize = 0; // 在 rust_main 里根据 kernel_end 初始化
 
@@ -128,7 +128,9 @@ extern "C" fn rust_main() -> ! {
 
     let kernel_end = PhysAddr(_kernel_end as *const () as usize);
     // 帧分配器从 kernel_end 向上对齐到 4K 之后开始
-    unsafe { NEXT_FRAME = (kernel_end.0 + 4095) & !4095; }
+    unsafe {
+        NEXT_FRAME = (kernel_end.0 + 4095) & !4095;
+    }
     let (mut pt, satp) = init_kernel(PhysAddr(0x8000_0000), kernel_end, alloc_frame);
 
     // UART MMIO 区域
@@ -152,7 +154,7 @@ extern "C" fn rust_main() -> ! {
     pt.map(
         VirtAddr(0x1_0000),
         code_page,
-        PTEFlags::new(true, false, true, true),  // R+X, U=1
+        PTEFlags::new(true, false, true, true), // R+X, U=1
     );
 
     // 用户栈页：映射到 0x1_0000_0000
@@ -160,7 +162,7 @@ extern "C" fn rust_main() -> ! {
     pt.map(
         VirtAddr(0x1_0000_0000),
         stack_page,
-        PTEFlags::new(true, true, false, true),  // R+W, U=1
+        PTEFlags::new(true, true, false, true), // R+W, U=1
     );
 
     unsafe {
@@ -171,7 +173,9 @@ extern "C" fn rust_main() -> ! {
     trap::init(trap_entry as *const () as usize);
 
     // sscratch 设内核 sp——timer 中断在内核态触发时靠它换回正确的栈
-    unsafe { asm!("csrw sscratch, sp"); }
+    unsafe {
+        asm!("csrw sscratch, sp");
+    }
     let next = read_time() + 10_000_000;
     set_timer(next);
     unsafe {

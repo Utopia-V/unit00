@@ -29,7 +29,9 @@ extern "C" fn trap_handler(
     if scause >> 63 == 1 {
         // 中断（timer）
         static mut TICK_COUNT: usize = 0;
-        unsafe { TICK_COUNT += 1; }
+        unsafe {
+            TICK_COUNT += 1;
+        }
         console::puts("tick ");
         print_hex(unsafe { TICK_COUNT });
         console::puts("\n");
@@ -44,11 +46,15 @@ extern "C" fn trap_handler(
                     let buf = arg1 as *const u8;
                     let len = arg2;
                     // 临时开 SUM，允许 S-mode 读用户内存
-                    unsafe { asm!("csrs sstatus, {}", in(reg) 1usize << 18); }
+                    unsafe {
+                        asm!("csrs sstatus, {}", in(reg) 1usize << 18);
+                    }
                     for i in 0..len {
                         console::putchar(unsafe { *buf.add(i) });
                     }
-                    unsafe { asm!("csrc sstatus, {}", in(reg) 1usize << 18); }
+                    unsafe {
+                        asm!("csrc sstatus, {}", in(reg) 1usize << 18);
+                    }
                 }
                 93 => {
                     // exit(code)
@@ -77,9 +83,12 @@ extern "C" fn trap_handler(
 fn print_hex(mut val: usize) {
     for _ in 0..16 {
         let nibbel = ((val >> 60) & 0xF) as u8;
-        let c = if nibbel < 10 { b'0' + nibbel } else { b'a' + nibbel - 10 };
+        let c = if nibbel < 10 {
+            b'0' + nibbel
+        } else {
+            b'a' + nibbel - 10
+        };
         console::putchar(c);
         val <<= 4;
     }
 }
-
