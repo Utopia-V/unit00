@@ -4,9 +4,10 @@ members = ["kernel"]
 
 [workspace.package]
 version = "0.1.0"
+authors = ["pilot.00"]
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/uranox/unit00"
+repository = ""
 
 [profile.dev]
 panic = "abort"

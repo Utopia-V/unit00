@@ -8,6 +8,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
     - run: rustup target add riscv64gc-unknown-none-elf
     - run: cargo fmt --all -- --check
     - run: cargo clippy -- -D warnings

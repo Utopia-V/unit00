@@ -31,4 +31,5 @@ SECTIONS
     _stack_start = .;
     . = . + 64K;
     _stack_end = .;
+    _kernel_end = .;
 }

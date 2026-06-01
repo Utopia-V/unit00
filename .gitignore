@@ -1,11 +1,7 @@
 /target
 Cargo.lock
-
-# Non-kernel docs (not tracked in git, live on disk only)
 /docs
 /notes
-/选择训练营项目
 /repos
 /CLAUDE.md
-/1.txt
 /.claude
