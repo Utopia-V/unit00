@@ -27,6 +27,7 @@ const X_BIT: u8 = 3;
 const U_BIT: u8 = 4;
 
 impl PTEntry {
+    #[allow(dead_code)]
     /// 空项（V=0，无效）
     fn empty() -> Self { Self(0) }
 
@@ -117,6 +118,7 @@ impl PageTable {
         }
     }
 
+    #[allow(dead_code)]
     /// 解除映射
     pub fn unmap(&mut self, vaddr: VirtAddr) {
         if let Some(entry) = self.walk(vaddr) {

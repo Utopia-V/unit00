@@ -6,9 +6,19 @@ ifeq ($(MODE),release)
     CARGO_FLAGS = --release
 endif
 
-.PHONY: build run check clippy fmt clean qemu
+.PHONY: all build run check clippy fmt fmt-check clean qemu
 
-build:
+# 评测系统入口：必须产出 kernel-rv
+all: kernel-rv
+
+kernel-rv: build
+	cp $(KERNEL_BIN) kernel-rv
+
+# 还原 .cargo（评测系统过滤隐藏目录，仓库里以 cargo_hidden 提交）
+.cargo: cargo_hidden
+	cp -r cargo_hidden .cargo
+
+build: .cargo
 	cargo build $(CARGO_FLAGS)
 
 run: build
@@ -19,10 +29,10 @@ run: build
 		-bios default \
 		-kernel $(KERNEL_BIN)
 
-check:
+check: .cargo
 	cargo check
 
-clippy:
+clippy: .cargo
 	cargo clippy $(CARGO_FLAGS) -- -D warnings
 
 fmt:
@@ -33,5 +43,6 @@ fmt-check:
 
 clean:
 	cargo clean
+	rm -f kernel-rv
 
 qemu: run

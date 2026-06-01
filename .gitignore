@@ -5,3 +5,5 @@ Cargo.lock
 /repos
 /CLAUDE.md
 /.claude
+.cargo
+/kernel-rv
