@@ -21,6 +21,11 @@ impl Uart16550 {
         }
     }
 
+    fn read_char(&self) -> u8 {
+        while self.read_reg(5) & (1 << 0) == 0 {}   
+        self.read_reg(0)
+    }
+
     fn read_reg(&self, offset: usize) -> u8 {
         unsafe { ((self.base + offset) as *const u8).read_volatile() }
     }
@@ -36,7 +41,10 @@ pub fn puts(s: &str) {
     UART.putstr(s);
 }
 
-#[allow(dead_code)]
 pub fn putchar(c: u8) {
     UART.putchar(c);
+}
+
+pub fn read_char() -> u8 {
+    UART.read_char()
 }

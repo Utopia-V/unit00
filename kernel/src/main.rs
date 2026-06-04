@@ -4,15 +4,15 @@
 mod console;
 mod mm;
 mod sbi;
+mod syscall;
 mod timer;
 mod trap;
 
+use crate::mm::frame::{self, alloc_frame, frame_init};
 use crate::mm::page_table::{PTEFlags, PhysAddr, VirtAddr, init_kernel};
 use crate::timer::{read_time, set_timer};
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
-
-static mut NEXT_FRAME: usize = 0; // 在 rust_main 里根据 kernel_end 初始化
 
 global_asm!(
     "
@@ -62,10 +62,11 @@ trap_entry:
 
     call trap_handler
 
-    // U-mode ecall? → sepc += 4
+    // U-mode ecall? → save return value + sepc += 4
     ld   t0, 40(sp)    // scause
     li   t1, 8
     bne  t0, t1, 1f
+    sd   a0,  8(sp)    // dispatch 返回值 → 用户 a0
     ld   t0, 48(sp)
     addi t0, t0, 4
     sd   t0, 48(sp)
@@ -90,23 +91,38 @@ global_asm!(
     .global user_prog_start
     .global user_prog_end
 user_prog_start:
-    addi sp, sp, -16
-    li   t0, 0x20696D616E617961
-    sd   t0, 0(sp)
-    li   t0, 0x696572
-    sw   t0, 8(sp)
+    addi sp, sp, -8
 
+    # write(1, '>', 1)
+    li   t0, 0x3E
+    sb   t0, 0(sp)
     li   a7, 64
     li   a0, 1
     mv   a1, sp
-    li   a2, 11
+    li   a2, 1
     ecall
-    addi sp, sp, 16
-    
-1:
-    j    1b
-msg:
-    .ascii \"Hello, world!\"
+
+    # read(0, sp, 2)
+    li   a7, 63
+    li   a0, 0
+    mv   a1, sp
+    li   a2, 2
+    ecall
+
+    # write(1, sp, 2)
+    li   a7, 64
+    li   a0, 1
+    mv   a1, sp
+    li   a2, 2
+    ecall
+
+    li   a7, 172
+    ecall
+    li   a7, 93
+    ecall
+
+    li   a0, 0
+    ecall
 user_prog_end:
     "
 );
@@ -128,10 +144,41 @@ extern "C" fn rust_main() -> ! {
 
     let kernel_end = PhysAddr(_kernel_end as *const () as usize);
     // 帧分配器从 kernel_end 向上对齐到 4K 之后开始
-    unsafe {
-        NEXT_FRAME = (kernel_end.0 + 4095) & !4095;
-    }
+    frame_init(kernel_end);
     let (mut pt, satp) = init_kernel(PhysAddr(0x8000_0000), kernel_end, alloc_frame);
+
+    console::puts("[test] frame allocator\n");
+    let f1 = alloc_frame().expect("test: alloc 1");
+    console::puts("  alloc 1: 0x");
+    trap::print_hex(f1.0);
+    console::puts("\n");
+
+    frame::inc_ref(f1);
+    let ref2 = frame::get_ref(f1);
+    console::puts("  after inc_ref: refcounts=");
+    trap::print_hex(ref2 as usize);
+    console::puts("\n");
+
+    frame::dec_ref(f1);
+    let ref1 = frame::get_ref(f1);
+    console::puts("  after dec_ref: refcount=");
+    trap::print_hex(ref1 as usize);
+    console::puts("\n");
+
+    frame::dec_ref(f1);
+    console::puts("  after dec_ref to 0: free_frame called\n");
+
+    let f2 = alloc_frame().expect("test: alloc 2");
+    console::puts("  alloc 2: 0x");
+    trap::print_hex(f2.0);
+    console::puts("\n");
+
+    if f1.0 == f2.0 {
+        console::puts("  [PASS] free list works\n");
+    } else {
+        console::puts("  [FAIL] got different frame\n");
+    }
+
 
     // UART MMIO 区域
     pt.map(
@@ -157,10 +204,10 @@ extern "C" fn rust_main() -> ! {
         PTEFlags::new(true, false, true, true), // R+X, U=1
     );
 
-    // 用户栈页：映射到 0x1_0000_0000
+    // 用户栈页：映射到 0x3F00_0000（VPN[2]=0，< KERNEL_VPN2_MIN）
     let stack_page = alloc_frame().expect("no frame for user stack");
     pt.map(
-        VirtAddr(0x1_0000_0000),
+        VirtAddr(0x3F00_0000),
         stack_page,
         PTEFlags::new(true, true, false, true), // R+W, U=1
     );
@@ -187,7 +234,7 @@ extern "C" fn rust_main() -> ! {
     unsafe {
         asm!(
             "csrw sscratch, sp",
-            "li   sp, 0x100001000",
+            "li   sp, 0x3F001000",
             "li   t0, 0x10000",
             "csrw sepc, t0",
             "csrw sstatus, zero",
@@ -204,8 +251,3 @@ unsafe extern "C" {
     fn user_prog_end();
 }
 
-fn alloc_frame() -> Option<mm::page_table::PhysAddr> {
-    let p = unsafe { NEXT_FRAME };
-    unsafe { NEXT_FRAME += 4096 };
-    Some(mm::page_table::PhysAddr(p))
-}
