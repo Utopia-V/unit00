@@ -1,13 +1,16 @@
 use core::{ptr::read, sync::atomic::{AtomicU32, AtomicU64}};
 
-use crate::mm::page_table::{PhysAddr};
+use crate::mm::page_table::PhysAddr;
+
+pub const RAM_BASE: usize = 0x8000_0000;   // QEMU virt 物理内存起点
+pub const RAM_SIZE: usize = 128 * 1024 * 1024; // 128MB，后续从 FDT 探测
 
 static mut NEXT_FRAME: usize = 0; // 在 rust_main 里根据 kernel_end 初始化
 static mut FRAME_REFS: [AtomicU32; 32768] = unsafe{ core::mem::zeroed() };
 static FREE_LIST_HEAD: AtomicU64 = AtomicU64::new(0);
 
 fn frame_index(pa: PhysAddr) -> usize {
-    (pa.0 - 0x8000_0000) >> 12
+    (pa.0 - RAM_BASE) >> 12
 }
 
 pub fn inc_ref(pa: PhysAddr) {
@@ -54,7 +57,7 @@ pub fn alloc_frame() -> Option<PhysAddr> {
         Some(pa)
     } else {
          let p = unsafe { NEXT_FRAME };
-         if p >= 0x8000_0000 + 128 * 1024 * 1024 {
+         if p >= RAM_BASE + RAM_SIZE {
             return None;
          }
          unsafe { NEXT_FRAME += 4096 };

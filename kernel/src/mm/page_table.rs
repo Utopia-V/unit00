@@ -89,7 +89,7 @@ impl PTEntry {
     // ── 构造器 ──
 
     /// 空项（V=0，无效）
-    fn empty() -> Self {
+    pub fn empty() -> Self {
         Self(0)
     }
 
@@ -100,7 +100,7 @@ impl PTEntry {
     }
 
     /// 指向最终物理页的条目（带读写等标志）
-    fn new_leaf(paddr: PhysAddr, flags: PTEFlags) -> Self {
+    pub fn new_leaf(paddr: PhysAddr, flags: PTEFlags) -> Self {
         let ppn = paddr.0 >> 12;
         Self((ppn << 10) as u64 | flags.into_u64())
     }
@@ -135,6 +135,7 @@ impl PTEFlags {
 
     pub fn is_r(&self) -> bool { self.0 & (1 << R_BIT) != 0 }
     pub fn is_w(&self) -> bool { self.0 & (1 << W_BIT) != 0 }
+    pub fn is_x(&self) -> bool { self.0 & (1 << X_BIT) != 0 }
     pub fn is_u(&self) -> bool { self.0 & (1 << U_BIT) != 0 }
 
     // ── 内部 ──
@@ -145,6 +146,9 @@ impl PTEFlags {
 }
 
 // ─── 页表 ───
+
+/// VPN[2] 分界线：< KERNEL_VPN2_MIN = 用户空间，>= = 内核空间
+pub const KERNEL_VPN2_MIN: usize = 2;
 
 /// SV39 页表。root 是根页表的物理地址。
 pub struct PageTable {
@@ -277,6 +281,10 @@ impl PageTable {
         (8usize << 60) | (self.root.0 >> 12)
     }
 
+    pub fn root_addr(&self) -> PhysAddr {
+        self.root
+    }
+
     // ─── 内部辅助 ───
 
     /// 取页表第 idx 项的指针
@@ -303,8 +311,7 @@ pub fn init_kernel(
     let mut pt = PageTable::new(root, frame_alloc);
     let flags = PTEFlags::new(true, true, true, false); // R+W+X, 仅内核
 
-    const RAM_SIZE: usize = 128 * 1024 * 1024;
-    let ram_end = PhysAddr(start.0 + RAM_SIZE);
+    let ram_end = PhysAddr(start.0 + crate::mm::frame::RAM_SIZE);
     let mut pa = start;
     while pa.0 < ram_end.0 {
         pt.map(VirtAddr(pa.0), pa, flags);

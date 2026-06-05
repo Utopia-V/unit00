@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(static_mut_refs)]
 
 mod console;
 mod mm;
@@ -7,6 +8,7 @@ mod sbi;
 mod syscall;
 mod timer;
 mod trap;
+mod task;
 
 use crate::mm::frame::{self, alloc_frame, frame_init};
 use crate::mm::page_table::{PTEFlags, PhysAddr, VirtAddr, init_kernel};
@@ -42,7 +44,7 @@ global_asm!(
     .align 4
 trap_entry:
     csrrw sp, sscratch, sp
-    addi sp, sp, -56
+    addi sp, sp, -64
     sd   ra,  0(sp)
     sd   a0,  8(sp)    // 用户 a0
     sd   a1, 16(sp)    // 用户 a1
@@ -53,12 +55,17 @@ trap_entry:
     csrr t1, sepc
     sd   t0, 40(sp)    // 保存 scause
     sd   t1, 48(sp)    // 保存 sepc
+
+    csrr t0, stval
+    sd   t0, 56(sp)    // 保存 stval
+
     mv   a0, t0
     mv   a1, t1
     ld   a2,  8(sp)    // 用户 a0 → arg2
     ld   a3, 16(sp)    // 用户 a1 → arg3
     ld   a4, 24(sp)    // 用户 a2 → arg4
     ld   a5, 32(sp)    // 用户 a7 → arg5
+    ld   a6, 56(sp)    // stval -> arg6
 
     call trap_handler
 
@@ -145,7 +152,7 @@ extern "C" fn rust_main() -> ! {
     let kernel_end = PhysAddr(_kernel_end as *const () as usize);
     // 帧分配器从 kernel_end 向上对齐到 4K 之后开始
     frame_init(kernel_end);
-    let (mut pt, satp) = init_kernel(PhysAddr(0x8000_0000), kernel_end, alloc_frame);
+    let (mut pt, satp) = init_kernel(PhysAddr(crate::mm::frame::RAM_BASE), kernel_end, alloc_frame);
 
     console::puts("[test] frame allocator\n");
     let f1 = alloc_frame().expect("test: alloc 1");
@@ -219,6 +226,11 @@ extern "C" fn rust_main() -> ! {
 
     trap::init(trap_entry as *const () as usize);
 
+    // 传递 trap_exit_restore 地址给调度器
+    unsafe {
+        crate::trap::TRAP_EXIT_RESTORE_ADDR = trap_exit_restore as *const () as usize;
+    }
+
     // sscratch 设内核 sp——timer 中断在内核态触发时靠它换回正确的栈
     unsafe {
         asm!("csrw sscratch, sp");
@@ -246,6 +258,7 @@ extern "C" fn rust_main() -> ! {
 
 unsafe extern "C" {
     fn trap_entry();
+    fn trap_exit_restore();
     fn _kernel_end();
     fn user_prog_start();
     fn user_prog_end();
