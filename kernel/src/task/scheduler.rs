@@ -35,6 +35,7 @@ pub fn current() -> &'static mut Process {
     }
 }
 
+#[allow(unused)]
 pub fn current_index() -> usize {
     unsafe { CURRENT }
 }
@@ -99,18 +100,17 @@ fn pick_next() -> usize {
 pub fn schedule() -> ! {
     // 1. 保存当前进程上下文
     let cur = current();
-    let sp: usize;
-    unsafe { asm!("mv {}, sp", out(reg) sp) };
-
-    // 内核栈布局：[ra:0] [a0:8] [a1:16] [a2:24] [a7:32] [scause:40] [sepc:48] [stval:56]
+    // trap frame 固定在 kernel_sp - 64（由 trap_entry 写入），
+    // 不能用当前 sp，因为 schedule() 调用链中 sp 早已离开该位置。
+    let frame_base = cur.kernel_sp - 64;
     unsafe {
-        cur.trap_frame.ra = core::ptr::read(sp as *const usize);
-        cur.trap_frame.a0 = core::ptr::read((sp + 8) as *const usize);
-        cur.trap_frame.a1 = core::ptr::read((sp + 16) as *const usize);
-        cur.trap_frame.a2 = core::ptr::read((sp + 24) as *const usize);
-        cur.trap_frame.a7 = core::ptr::read((sp + 32) as *const usize);
-        cur.trap_frame.scause = core::ptr::read((sp + 40) as *const usize);
-        cur.trap_frame.sepc = core::ptr::read((sp + 48) as *const usize);
+        cur.trap_frame.ra = core::ptr::read(frame_base as *const usize);
+        cur.trap_frame.a0 = core::ptr::read((frame_base + 8) as *const usize);
+        cur.trap_frame.a1 = core::ptr::read((frame_base + 16) as *const usize);
+        cur.trap_frame.a2 = core::ptr::read((frame_base + 24) as *const usize);
+        cur.trap_frame.a7 = core::ptr::read((frame_base + 32) as *const usize);
+        cur.trap_frame.scause = core::ptr::read((frame_base + 40) as *const usize);
+        cur.trap_frame.sepc = core::ptr::read((frame_base + 48) as *const usize);
     }
     // 从 sscratch 读用户 sp（trap 期间 sscratch 持有用户 sp）
     unsafe { asm!("csrr {}, sscratch", out(reg) cur.trap_frame.sp) };
@@ -128,34 +128,50 @@ pub fn schedule() -> ! {
     let next = current();
     next.state = ProcessState::Running;
 
-    // 切页表
-    let satp = next.page_table.satp_val();
-    unsafe {
-        asm!("csrw satp, {}", in(reg) satp);
-        asm!("sfence.vma");
-    }
-
-    // 4. 恢复新进程上下文
-    // sscratch = 用户 sp（trap_exit 的 csrrw 会换回）
-    unsafe { asm!("csrw sscratch, {}", in(reg) next.trap_frame.sp) };
-    // sp = kernel_sp - 64（模拟 trap_entry 刚 push 完的状态）
+    // 提前读出所有需要的值（mv sp 之后不能再访问 Rust 局部变量）
+    let next_satp = next.page_table.satp_val();
     let new_sp = next.kernel_sp - 64;
-    unsafe { asm!("mv sp, {}", in(reg) new_sp) };
-    // 将 TrapFrame 字段写回内核栈
-    unsafe {
-        core::ptr::write(new_sp as *mut usize, next.trap_frame.ra);
-        core::ptr::write((new_sp + 8) as *mut usize, next.trap_frame.a0);
-        core::ptr::write((new_sp + 16) as *mut usize, next.trap_frame.a1);
-        core::ptr::write((new_sp + 24) as *mut usize, next.trap_frame.a2);
-        core::ptr::write((new_sp + 32) as *mut usize, next.trap_frame.a7);
-        core::ptr::write((new_sp + 40) as *mut usize, next.trap_frame.scause);
-        core::ptr::write((new_sp + 48) as *mut usize, next.trap_frame.sepc);
-    }
-    // 写 sstatus
-    unsafe { asm!("csrw sstatus, {}", in(reg) next.trap_frame.sstatus) };
+    let user_sp = next.trap_frame.sp;
+    let sstatus = next.trap_frame.sstatus;
+    let ra   = next.trap_frame.ra;
+    let a0   = next.trap_frame.a0;
+    let a1   = next.trap_frame.a1;
+    let a2   = next.trap_frame.a2;
+    let a7   = next.trap_frame.a7;
+    let scause = next.trap_frame.scause;
+    let sepc = next.trap_frame.sepc;
+    let restore_addr = unsafe { crate::trap::TRAP_EXIT_RESTORE_ADDR };
 
-    // 5. 跳转到 trap_exit_restore（外部 asm 标签，Task 5 中定义）
+    // 切页表、写 trap frame、切换 sscratch/sp/sstatus、跳转 ——
+    // 全部放在一个 asm 块里。mv sp 之后编译器不能再插入任何指令。
     unsafe {
-        asm!("j {}", in(reg) crate::trap::TRAP_EXIT_RESTORE_ADDR, options(noreturn));
+        asm!(
+            "csrw satp, {next_satp}",
+            "sfence.vma",
+            "sd   {ra},  0({new_sp})",
+            "sd   {a0},  8({new_sp})",
+            "sd   {a1}, 16({new_sp})",
+            "sd   {a2}, 24({new_sp})",
+            "sd   {a7}, 32({new_sp})",
+            "sd   {scause}, 40({new_sp})",
+            "sd   {sepc}, 48({new_sp})",
+            "csrw sscratch, {user_sp}",
+            "mv   sp, {new_sp}",
+            "csrw sstatus, {sstatus}",
+            "jr   {restore_addr}",
+            next_satp = in(reg) next_satp,
+            new_sp = in(reg) new_sp,
+            user_sp = in(reg) user_sp,
+            ra = in(reg) ra,
+            a0 = in(reg) a0,
+            a1 = in(reg) a1,
+            a2 = in(reg) a2,
+            a7 = in(reg) a7,
+            scause = in(reg) scause,
+            sepc = in(reg) sepc,
+            sstatus = in(reg) sstatus,
+            restore_addr = in(reg) restore_addr,
+            options(noreturn),
+        );
     }
 }

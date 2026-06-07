@@ -10,7 +10,7 @@ mod timer;
 mod trap;
 mod task;
 
-use crate::mm::frame::{self, alloc_frame, frame_init};
+use crate::mm::frame::{alloc_frame, frame_init};
 use crate::mm::page_table::{PTEFlags, PhysAddr, VirtAddr, init_kernel};
 use crate::timer::{read_time, set_timer};
 use core::arch::{asm, global_asm};
@@ -41,9 +41,24 @@ global_asm!(
     "
     .section .text.trap_entry
     .global trap_entry
+    .global trap_exit_restore
     .align 4
 trap_entry:
+    // 区分 U-mode trap 还是 S-mode 嵌套 trap
+    csrr t0, sstatus
+    srli t0, t0, 8    // SPP 在 bit 8
+    andi t0, t0, 1
+    bnez  t0, 1f       // SPP=1 → 来自 S-mode，嵌套 trap
+
+    // 来自 U-mode：正常路径
     csrrw sp, sscratch, sp
+    j     2f
+
+1:  // 来自 S-mode：嵌套 trap
+    // sp 已经在内核栈上（无需 swap），sscratch 持有用户 sp
+    // 直接继续——不需要 csrrw
+
+2:
     addi sp, sp, -64
     sd   ra,  0(sp)
     sd   a0,  8(sp)    // 用户 a0
@@ -56,8 +71,8 @@ trap_entry:
     sd   t0, 40(sp)    // 保存 scause
     sd   t1, 48(sp)    // 保存 sepc
 
-    csrr t0, stval
-    sd   t0, 56(sp)    // 保存 stval
+    csrr t2, stval
+    sd   t2, 56(sp)    // 保存 stval
 
     mv   a0, t0
     mv   a1, t1
@@ -86,8 +101,33 @@ trap_entry:
     ld   a1, 16(sp)
     ld   a0,  8(sp)
     ld   ra,  0(sp)
-    addi sp, sp, 56
+    addi sp, sp, 64
+    // 仅当返回 U-mode (SPP=0) 时才做 csrrw
+    csrr t0, sstatus
+    srli t0, t0, 8
+    andi t0, t0, 1
+    bnez  t0, 2f
     csrrw sp, sscratch, sp
+2:
+    sret
+
+    // trap_exit_restore: schedule()/init 入口
+trap_exit_restore:
+    ld   t0, 48(sp)
+    csrw sepc, t0
+    ld   a7, 32(sp)
+    ld   a2, 24(sp)
+    ld   a1, 16(sp)
+    ld   a0,  8(sp)
+    ld   ra,  0(sp)
+    addi sp, sp, 64
+    // 仅当返回 U-mode (SPP=0) 时才做 csrrw
+    csrr t0, sstatus
+    srli t0, t0, 8
+    andi t0, t0, 1
+    bnez  t0, 2f
+    csrrw sp, sscratch, sp
+2:
     sret
     "
 );
@@ -98,37 +138,27 @@ global_asm!(
     .global user_prog_start
     .global user_prog_end
 user_prog_start:
-    addi sp, sp, -8
-
-    # write(1, '>', 1)
-    li   t0, 0x3E
-    sb   t0, 0(sp)
-    li   a7, 64
-    li   a0, 1
-    mv   a1, sp
-    li   a2, 1
+    // fork()
+    li   a7, 220
     ecall
+    // a0 != 0 -> parent, a0 == 0 -> child
+    beqz a0, child
 
-    # read(0, sp, 2)
-    li   a7, 63
-    li   a0, 0
-    mv   a1, sp
-    li   a2, 2
+parent:
+    // wait(&exit_code) - store ptr on stack
+    addi sp, sp, -16
+    li   a7, 260
+    mv   a0, sp       // exit_code_ptr = sp
     ecall
-
-    # write(1, sp, 2)
-    li   a7, 64
-    li   a0, 1
-    mv   a1, sp
-    li   a2, 2
-    ecall
-
-    li   a7, 172
-    ecall
+    // exit(0)
     li   a7, 93
+    li   a0, 0
     ecall
 
-    li   a0, 0
+child:
+    // exit(42)
+    li   a7, 93
+    li   a0, 42
     ecall
 user_prog_end:
     "
@@ -153,39 +183,6 @@ extern "C" fn rust_main() -> ! {
     // 帧分配器从 kernel_end 向上对齐到 4K 之后开始
     frame_init(kernel_end);
     let (mut pt, satp) = init_kernel(PhysAddr(crate::mm::frame::RAM_BASE), kernel_end, alloc_frame);
-
-    console::puts("[test] frame allocator\n");
-    let f1 = alloc_frame().expect("test: alloc 1");
-    console::puts("  alloc 1: 0x");
-    trap::print_hex(f1.0);
-    console::puts("\n");
-
-    frame::inc_ref(f1);
-    let ref2 = frame::get_ref(f1);
-    console::puts("  after inc_ref: refcounts=");
-    trap::print_hex(ref2 as usize);
-    console::puts("\n");
-
-    frame::dec_ref(f1);
-    let ref1 = frame::get_ref(f1);
-    console::puts("  after dec_ref: refcount=");
-    trap::print_hex(ref1 as usize);
-    console::puts("\n");
-
-    frame::dec_ref(f1);
-    console::puts("  after dec_ref to 0: free_frame called\n");
-
-    let f2 = alloc_frame().expect("test: alloc 2");
-    console::puts("  alloc 2: 0x");
-    trap::print_hex(f2.0);
-    console::puts("\n");
-
-    if f1.0 == f2.0 {
-        console::puts("  [PASS] free list works\n");
-    } else {
-        console::puts("  [FAIL] got different frame\n");
-    }
-
 
     // UART MMIO 区域
     pt.map(
@@ -251,7 +248,7 @@ extern "C" fn rust_main() -> ! {
     let init_satp = pt.satp_val();
 
     let init = Process {
-        pid: 1,
+        pid: crate::task::scheduler::alloc_pid(),
         parent_pid: 0, // 哨兵，无父进程
         state: ProcessState::Running,
         page_table: pt,
@@ -289,8 +286,9 @@ extern "C" fn rust_main() -> ! {
     }
     unsafe { asm!("mv sp, {}", in(reg) new_sp); }
     unsafe { asm!("csrw sstatus, {}", in(reg) init.trap_frame.sstatus); }
+    let addr = unsafe { crate::trap::TRAP_EXIT_RESTORE_ADDR };
     unsafe {
-        asm!("j {}", in(reg) crate::trap::TRAP_EXIT_RESTORE_ADDR, options(noreturn));
+        asm!("jr {}", in(reg) addr, options(noreturn));
     }
 }
 

@@ -26,13 +26,31 @@ pub fn trigger_breakpoint() {
 #[unsafe(no_mangle)]
 extern "C" fn trap_handler(
     scause: usize,
-    _sepc: usize,
+    sepc: usize,
     arg0: usize,
     arg1: usize,
     arg2: usize,
     syscall_no: usize,
     stval: usize,
 ) -> usize {
+    // 更新当前进程 TrapFrame，使 syscall（如 fork）能读到正确的寄存器值。
+    // trap frame 位于 kernel_sp - 64，由 trap_entry 汇编填写。
+    {
+        let proc = current();
+        let frame_base = proc.kernel_sp - 64;
+        unsafe {
+            proc.trap_frame.ra = core::ptr::read(frame_base as *const usize);
+            proc.trap_frame.a0 = core::ptr::read((frame_base + 8) as *const usize);
+            proc.trap_frame.a1 = core::ptr::read((frame_base + 16) as *const usize);
+            proc.trap_frame.a2 = core::ptr::read((frame_base + 24) as *const usize);
+            proc.trap_frame.a7 = core::ptr::read((frame_base + 32) as *const usize);
+            proc.trap_frame.scause = core::ptr::read((frame_base + 40) as *const usize);
+            proc.trap_frame.sepc = sepc; // 直接用参数，不再从栈读
+        }
+        unsafe { asm!("csrr {}, sscratch", out(reg) proc.trap_frame.sp) };
+        unsafe { asm!("csrr {}, sstatus", out(reg) proc.trap_frame.sstatus) };
+    }
+
     if scause >> 63 == 1 {
         // 中断（timer）
         static mut TICK_COUNT: usize = 0;
@@ -66,7 +84,6 @@ fn page_fault_handler(scause: usize, stval: usize) -> usize {
     // 非 Store Page Fault (15) → 段错误
     if scause != 15 {
         do_segfault(scause, stval);
-        // do_segfault 调 schedule() 所以不可达，编译器需要返回值
         return 0;
     }
 
@@ -75,9 +92,8 @@ fn page_fault_handler(scause: usize, stval: usize) -> usize {
     let proc = crate::task::scheduler::current();
     if let Some(entry) = proc.page_table.lookup(vaddr) {
         if entry.is_cow() && entry.is_r() && !entry.is_w() && entry.is_u() {
-            // COW 共享页 → 拆分
             handle_cow_fault(vaddr, entry);
-            return 0; // sret 重试写操作
+            return 0;
         }
     }
 
@@ -86,7 +102,7 @@ fn page_fault_handler(scause: usize, stval: usize) -> usize {
     0
 }
 
-fn handle_cow_fault(_vaddr: VirtAddr, entry: &mut PTEntry) {
+pub(crate) fn handle_cow_fault(_vaddr: VirtAddr, entry: &mut PTEntry) {
     use crate::mm::frame;
     let ppn = entry.ppn_to_addr();
     let refcount = frame::get_ref(ppn);
