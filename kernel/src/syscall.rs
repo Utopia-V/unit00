@@ -74,6 +74,17 @@ pub fn dispatch(syscall_no: usize, arg0: usize, arg1: usize, arg2: usize) -> usi
             1
         }
         220 => sys_fork(),
+        221 => {
+            // exec: stub（文件系统就绪后实现 ELF 加载）
+            let cur = current();
+            cur.trap_frame.sepc = 0x10000;    // 硬编码用户代码入口
+            cur.trap_frame.sp = 0x3F001000;   // 硬编码用户栈顶
+            0
+        }
+        260 => {
+            // wait(exit_code_ptr)
+            sys_wait(arg0 as *mut usize)
+        }
         _ => {
             console::puts("\nunknown syscall: ");
             trap::print_hex(syscall_no);
@@ -160,4 +171,97 @@ fn sys_fork() -> usize {
     unsafe { asm!("sfence.vma"); }
 
     parent_ret
+}
+
+fn sys_wait(exit_code_ptr: *mut usize) -> usize {
+    use crate::task::scheduler::{PROCESS_LIST, MAX_PROCESSES};
+
+    let cur_pid = current().pid;
+
+    // 1. 找 Zombie 子进程
+    for i in 0..MAX_PROCESSES {
+        let slot = unsafe { &mut PROCESS_LIST[i] };
+        if let Some(child) = slot {
+            if child.parent_pid == cur_pid {
+                if let ProcessState::Zombie(code) = child.state {
+                    // 2. 找到 → 写退出码到用户内存
+                    if !exit_code_ptr.is_null() {
+                        unsafe {
+                            asm!("csrs sstatus, {}", in(reg) 1usize << 18); // 开 SUM
+                            core::ptr::write(exit_code_ptr, code);
+                            asm!("csrc sstatus, {}", in(reg) 1usize << 18); // 关 SUM
+                        }
+                    }
+
+                    // 释放子进程私有资源
+                    free_user_pt_resources(child);
+
+                    child.state = ProcessState::Gone;
+                    return child.pid;
+                }
+            }
+        }
+    }
+
+    // 3. 有活子进程 → Blocked
+    for i in 0..MAX_PROCESSES {
+        let slot = unsafe { &PROCESS_LIST[i] };
+        if let Some(child) = slot {
+            if child.parent_pid == cur_pid
+                && child.state != ProcessState::Gone
+                && !matches!(child.state, ProcessState::Zombie(_))
+            {
+                // 有活子进程，当前进程阻塞
+                current().state = ProcessState::Blocked;
+                schedule();
+                // schedule() 不返回，被唤醒后 trap_handler 重新调用 wait
+            }
+        }
+    }
+
+    // 4. 无子进程
+    (-10isize) as usize // ECHILD = 10
+}
+
+fn free_user_pt_resources(child: &mut Process) {
+    use crate::mm::frame;
+
+    // 释放内核栈帧
+    frame::free_frame(child.kernel_stack_frame);
+
+    // 释放 VPN[2] < KERNEL_VPN2_MIN 的中间页表帧 + 根页表帧
+    let root_addr = child.page_table.root_addr();
+    free_intermediate_frames(root_addr, 0, KERNEL_VPN2_MIN);
+
+    // 释放根页表帧本身
+    frame::free_frame(root_addr);
+}
+
+fn free_intermediate_frames(root: crate::mm::page_table::PhysAddr, vpn2_min: usize, vpn2_max: usize) {
+    use crate::mm::frame;
+    use crate::mm::page_table::PTEntry;
+
+    let root_ptr = root.0 as *mut PTEntry;
+    for vpn2 in vpn2_min..vpn2_max {
+        let entry = unsafe { &mut *root_ptr.add(vpn2) };
+        if !entry.is_valid() {
+            continue;
+        }
+        let l2_addr = entry.ppn_to_addr();
+        let l2_ptr = l2_addr.0 as *mut PTEntry;
+        for vpn1 in 0..512 {
+            let l2_entry = unsafe { &mut *l2_ptr.add(vpn1) };
+            if !l2_entry.is_valid() {
+                continue;
+            }
+            // 非叶子 → L1 帧
+            if !l2_entry.is_r() && !l2_entry.is_w() && !l2_entry.is_x() {
+                let l1_addr = l2_entry.ppn_to_addr();
+                // L1 帧内的叶子已在 exit / free_user_pt 中 dec_ref
+                frame::free_frame(l1_addr);
+            }
+        }
+        // 释放 L2 帧
+        frame::free_frame(l2_addr);
+    }
 }

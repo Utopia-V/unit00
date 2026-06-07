@@ -242,17 +242,55 @@ extern "C" fn rust_main() -> ! {
         asm!("csrs sstatus, {}", in(reg) 1usize << 1);
     }
 
-    // 切到用户态
+    // ── 构造 init Process ──
+    use crate::task::process::{Process, ProcessState};
+    use crate::task::trapframe::TrapFrame;
+
+    let kernel_stack = alloc_frame().expect("no frame for init kernel stack");
+    let kernel_sp = kernel_stack.0 + 4096;
+    let init_satp = pt.satp_val();
+
+    let init = Process {
+        pid: 1,
+        parent_pid: 0, // 哨兵，无父进程
+        state: ProcessState::Running,
+        page_table: pt,
+        trap_frame: TrapFrame {
+            ra: 0,
+            sp: 0x3F001000,
+            a0: 0, a1: 0, a2: 0, a7: 0,
+            scause: 8,     // 仅作标记
+            sepc: 0x10000, // 用户程序入口
+            sstatus: 0,    // SPP=0 → sret 到 U-mode
+        },
+        kernel_sp,
+        kernel_stack_frame: kernel_stack,
+    };
+
     unsafe {
-        asm!(
-            "csrw sscratch, sp",
-            "li   sp, 0x3F001000",
-            "li   t0, 0x10000",
-            "csrw sepc, t0",
-            "csrw sstatus, zero",
-            "sret",
-            options(noreturn),
-        );
+        crate::task::scheduler::PROCESS_LIST[0] = Some(init);
+        crate::task::scheduler::CURRENT = 0;
+    }
+
+    // 手工搭栈 → 跳 trap_exit_restore
+    let init = crate::task::scheduler::current();
+    unsafe { asm!("csrw satp, {}", in(reg) init_satp); }
+    unsafe { asm!("sfence.vma"); }
+    unsafe { asm!("csrw sscratch, {}", in(reg) init.trap_frame.sp); }
+    let new_sp = init.kernel_sp - 64;
+    unsafe {
+        core::ptr::write(new_sp as *mut usize, init.trap_frame.ra);
+        core::ptr::write((new_sp + 8) as *mut usize, init.trap_frame.a0);
+        core::ptr::write((new_sp + 16) as *mut usize, init.trap_frame.a1);
+        core::ptr::write((new_sp + 24) as *mut usize, init.trap_frame.a2);
+        core::ptr::write((new_sp + 32) as *mut usize, init.trap_frame.a7);
+        core::ptr::write((new_sp + 40) as *mut usize, init.trap_frame.scause);
+        core::ptr::write((new_sp + 48) as *mut usize, init.trap_frame.sepc);
+    }
+    unsafe { asm!("mv sp, {}", in(reg) new_sp); }
+    unsafe { asm!("csrw sstatus, {}", in(reg) init.trap_frame.sstatus); }
+    unsafe {
+        asm!("j {}", in(reg) crate::trap::TRAP_EXIT_RESTORE_ADDR, options(noreturn));
     }
 }
 

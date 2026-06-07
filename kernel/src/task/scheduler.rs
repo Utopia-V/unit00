@@ -1,11 +1,11 @@
 use crate::task::process::{Process, ProcessState};
 use core::arch::asm;
 
-const MAX_PROCESSES: usize = 32;
+pub(crate) const MAX_PROCESSES: usize = 32;
 
 pub(crate) static mut PROCESS_LIST: [Option<Process>; MAX_PROCESSES] = [const { None }; MAX_PROCESSES];
 
-static mut CURRENT: usize = 0;
+pub(crate) static mut CURRENT: usize = 0;
 static mut NEXT_PID: usize = 1;
 
 // ── 简单 helper ──
