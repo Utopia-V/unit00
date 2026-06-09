@@ -52,11 +52,21 @@ impl PTEntry {
 
     // ── 权限查询 ──
 
-    pub fn is_r(&self) -> bool { self.0 & Self::BIT_R != 0 }
-    pub fn is_w(&self) -> bool { self.0 & Self::BIT_W != 0 }
-    pub fn is_x(&self) -> bool { self.0 & Self::BIT_X != 0 }
-    pub fn is_u(&self) -> bool { self.0 & Self::BIT_U != 0 }
-    pub fn is_valid(&self) -> bool { self.0 & Self::BIT_V != 0 }
+    pub fn is_r(&self) -> bool {
+        self.0 & Self::BIT_R != 0
+    }
+    pub fn is_w(&self) -> bool {
+        self.0 & Self::BIT_W != 0
+    }
+    pub fn is_x(&self) -> bool {
+        self.0 & Self::BIT_X != 0
+    }
+    pub fn is_u(&self) -> bool {
+        self.0 & Self::BIT_U != 0
+    }
+    pub fn is_valid(&self) -> bool {
+        self.0 & Self::BIT_V != 0
+    }
 
     // ── 写权限修改（仅操作 bit 2，不动其他位含 COW bit 62）──
 
@@ -79,11 +89,6 @@ impl PTEntry {
     /// 读低 5 位标志（V/R/W/X/U），丢弃高位信息（COW）
     pub fn flags(&self) -> PTEFlags {
         PTEFlags((self.0 & 0x1F) as u8)
-    }
-
-    /// 只修改低 5 位（V/R/W/X/U），保留高位（含 COW bit 62）
-    pub fn set_flags(&mut self, flags: PTEFlags) {
-        self.0 = (self.0 & !0x1F) | (flags.0 as u64);
     }
 
     // ── 构造器 ──
@@ -133,10 +138,12 @@ impl PTEFlags {
 
     // ── 权限查询 ──
 
-    pub fn is_r(&self) -> bool { self.0 & (1 << R_BIT) != 0 }
-    pub fn is_w(&self) -> bool { self.0 & (1 << W_BIT) != 0 }
-    pub fn is_x(&self) -> bool { self.0 & (1 << X_BIT) != 0 }
-    pub fn is_u(&self) -> bool { self.0 & (1 << U_BIT) != 0 }
+    pub fn is_x(&self) -> bool {
+        self.0 & (1 << X_BIT) != 0
+    }
+    pub fn is_u(&self) -> bool {
+        self.0 & (1 << U_BIT) != 0
+    }
 
     // ── 内部 ──
 
@@ -203,7 +210,7 @@ impl PageTable {
         let vpn = [
             (vaddr.0 >> 12) & 0x1ff,
             (vaddr.0 >> 21) & 0x1ff,
-            (vaddr.0 >> 30) & 0x1ff
+            (vaddr.0 >> 30) & 0x1ff,
         ];
         let mut table_addr = self.root;
 
@@ -219,12 +226,8 @@ impl PageTable {
     }
 
     /// 遍历指定 VPN[2] 范围内所有有效叶子 PTE
-    pub fn for_each_leaf<F>(
-        &self,
-        vpn2_min: usize,
-        vpn2_max: usize,
-        callback: &mut F,
-    ) where 
+    pub fn for_each_leaf<F>(&self, vpn2_min: usize, vpn2_max: usize, callback: &mut F)
+    where
         F: FnMut(VirtAddr, &mut PTEntry),
     {
         for vpn2 in vpn2_min..vpn2_max {
@@ -251,18 +254,29 @@ impl PageTable {
                             continue;
                         }
                         let vaddr = VirtAddr((vpn2 << 30) | (vpn1 << 21) | (vpn0 << 12));
-                        callback(vaddr, l1_entry); 
-                    }   
+                        callback(vaddr, l1_entry);
+                    }
                 }
             }
-
         }
     }
 
     /// 把一个虚拟页映射到一个物理页
     pub fn map(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags) {
+        self.map_leaf(vaddr, paddr, flags, false);
+    }
+
+    /// 映射一个 COW 叶子页。COW 位在 PTE 高位，不能放进 PTEFlags。
+    pub fn map_cow(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags) {
+        self.map_leaf(vaddr, paddr, flags, true);
+    }
+
+    fn map_leaf(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags, cow: bool) {
         if let Some(entry) = self.walk(vaddr) {
             *entry = PTEntry::new_leaf(paddr, flags);
+            if cow {
+                entry.set_cow();
+            }
         }
     }
 
