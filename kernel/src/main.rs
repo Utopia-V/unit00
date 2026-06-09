@@ -171,6 +171,190 @@ global_asm!(
     .global user_prog_start
     .global user_prog_end
 user_prog_start:
+    // Register preservation smoke test across getpid().
+    li   gp, 0x3333
+    li   tp, 0x4444
+    li   t0, 0x1005
+    li   t1, 0x1006
+    li   t2, 0x1007
+    li   s0, 0x1008
+    li   s1, 0x1009
+    li   a1, 0x200b
+    li   a2, 0x200c
+    li   a3, 0x200d
+    li   a4, 0x200e
+    li   a5, 0x200f
+    li   a6, 0x2010
+    li   s2, 0x1012
+    li   s3, 0x1013
+    li   s4, 0x1014
+    li   s5, 0x1015
+    li   s6, 0x1016
+    li   s7, 0x1017
+    li   s8, 0x1018
+    li   s9, 0x1019
+    li   s10, 0x101a
+    li   s11, 0x101b
+    li   t3, 0x101c
+    li   t4, 0x101d
+    li   t5, 0x101e
+    li   t6, 0x101f
+    li   a7, 172
+    ecall
+
+    li   a0, 0x3333
+    bne  gp, a0, reg_fail
+    li   a0, 0x4444
+    bne  tp, a0, reg_fail
+    li   a0, 0x1005
+    bne  t0, a0, reg_fail
+    li   a0, 0x1006
+    bne  t1, a0, reg_fail
+    li   a0, 0x1007
+    bne  t2, a0, reg_fail
+    li   a0, 0x1008
+    bne  s0, a0, reg_fail
+    li   a0, 0x1009
+    bne  s1, a0, reg_fail
+    li   a0, 0x200b
+    bne  a1, a0, reg_fail
+    li   a0, 0x200c
+    bne  a2, a0, reg_fail
+    li   a0, 0x200d
+    bne  a3, a0, reg_fail
+    li   a0, 0x200e
+    bne  a4, a0, reg_fail
+    li   a0, 0x200f
+    bne  a5, a0, reg_fail
+    li   a0, 0x2010
+    bne  a6, a0, reg_fail
+    li   a0, 0x1012
+    bne  s2, a0, reg_fail
+    li   a0, 0x1013
+    bne  s3, a0, reg_fail
+    li   a0, 0x1014
+    bne  s4, a0, reg_fail
+    li   a0, 0x1015
+    bne  s5, a0, reg_fail
+    li   a0, 0x1016
+    bne  s6, a0, reg_fail
+    li   a0, 0x1017
+    bne  s7, a0, reg_fail
+    li   a0, 0x1018
+    bne  s8, a0, reg_fail
+    li   a0, 0x1019
+    bne  s9, a0, reg_fail
+    li   a0, 0x101a
+    bne  s10, a0, reg_fail
+    li   a0, 0x101b
+    bne  s11, a0, reg_fail
+    li   a0, 0x101c
+    bne  t3, a0, reg_fail
+    li   a0, 0x101d
+    bne  t4, a0, reg_fail
+    li   a0, 0x101e
+    bne  t5, a0, reg_fail
+    li   a0, 0x101f
+    bne  t6, a0, reg_fail
+
+    addi sp, sp, -16
+    li   t0, 0x0a4b4f    // OK\n
+    sd   t0, 0(sp)
+    li   a7, 64
+    li   a0, 1
+    mv   a1, sp
+    li   a2, 3
+    ecall
+    addi sp, sp, 16
+
+    // Basic syscall smoke tests.
+    addi sp, sp, -512
+
+    li   a7, 160        // uname(buf)
+    mv   a0, sp
+    ecall
+    bnez a0, sys_fail
+
+    li   a7, 17         // getcwd(buf, 16)
+    mv   a0, sp
+    li   a1, 16
+    ecall
+    li   t0, 2
+    bne  a0, t0, sys_fail
+    lb   t0, 0(sp)
+    li   t1, 47         // '/'
+    bne  t0, t1, sys_fail
+    lb   t0, 1(sp)
+    bnez t0, sys_fail
+
+    li   a7, 173        // getppid() for init -> 0
+    ecall
+    bnez a0, sys_fail
+
+    li   a7, 178        // gettid() == getpid() == 1 for init
+    ecall
+    li   t0, 1
+    bne  a0, t0, sys_fail
+
+    li   a7, 174        // getuid() stage-1 root user
+    ecall
+    bnez a0, sys_fail
+
+    li   a7, 64         // write(bad_fd, buf, 1) -> -EBADF
+    li   a0, 9
+    mv   a1, sp
+    li   a2, 1
+    ecall
+    li   t0, -9
+    bne  a0, t0, sys_fail
+
+    li   a7, 9999       // unknown syscall -> -ENOSYS
+    ecall
+    li   t0, -38
+    bne  a0, t0, sys_fail
+
+    li   a7, 214        // brk(0) -> current break
+    li   a0, 0
+    ecall
+    li   t0, 0x20000
+    bne  a0, t0, sys_fail
+
+    li   a7, 214        // brk(0x20008)
+    li   a0, 0x20008
+    ecall
+    li   t0, 0x20008
+    bne  a0, t0, sys_fail
+    li   t0, 0x20000
+    li   t1, 0x5a
+    sb   t1, 0(t0)
+    lb   t2, 0(t0)
+    bne  t1, t2, sys_fail
+
+    li   a7, 214        // grow across one more page
+    li   a0, 0x22000
+    ecall
+    li   t0, 0x22000
+    bne  a0, t0, sys_fail
+    li   t0, 0x21000
+    li   t1, 0x33
+    sb   t1, 0(t0)
+    lb   t2, 0(t0)
+    bne  t1, t2, sys_fail
+
+    li   a7, 214        // shrink back to the heap base
+    li   a0, 0x20000
+    ecall
+    li   t0, 0x20000
+    bne  a0, t0, sys_fail
+
+    li   a7, 214        // above heap limit -> old break
+    li   a0, 0x3f000000
+    ecall
+    li   t0, 0x20000
+    bne  a0, t0, sys_fail
+
+    addi sp, sp, 512
+
     // fork()
     li   a7, 220
     ecall
@@ -192,6 +376,35 @@ child:
     // exit(42)
     li   a7, 93
     li   a0, 42
+    ecall
+
+sys_fail:
+    addi sp, sp, 512
+    addi sp, sp, -16
+    li   t0, 0x0a4653    // SF\n
+    sd   t0, 0(sp)
+    li   a7, 64
+    li   a0, 1
+    mv   a1, sp
+    li   a2, 3
+    ecall
+    addi sp, sp, 16
+    li   a7, 93
+    li   a0, 1
+    ecall
+
+reg_fail:
+    addi sp, sp, -16
+    li   t0, 0x0a4652    // RF\n
+    sd   t0, 0(sp)
+    li   a7, 64
+    li   a0, 1
+    mv   a1, sp
+    li   a2, 3
+    ecall
+    addi sp, sp, 16
+    li   a7, 93
+    li   a0, 1
     ecall
 user_prog_end:
     "
@@ -279,7 +492,7 @@ extern "C" fn rust_main() -> ! {
     }
 
     // ── 构造 init Process ──
-    use crate::task::process::{Process, ProcessState};
+    use crate::task::process::{Process, ProcessState, USER_HEAP_START};
     use crate::task::trapframe::TrapFrame;
 
     let kernel_stack = alloc_frame().expect("no frame for init kernel stack");
@@ -294,6 +507,8 @@ extern "C" fn rust_main() -> ! {
         trap_frame: TrapFrame::new_user(0x10000, 0x3F001000),
         kernel_sp,
         kernel_stack_frame: kernel_stack,
+        heap_start: USER_HEAP_START,
+        heap_end: USER_HEAP_START,
     };
 
     unsafe {

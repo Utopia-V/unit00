@@ -22,7 +22,7 @@ impl Uart16550 {
     }
 
     fn read_char(&self) -> u8 {
-        while self.read_reg(5) & (1 << 0) == 0 {}   
+        while self.read_reg(5) & (1 << 0) == 0 {}
         self.read_reg(0)
     }
 

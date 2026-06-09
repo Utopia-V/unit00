@@ -1,6 +1,12 @@
-use crate::{mm::page_table::{PageTable, PhysAddr}, task::trapframe::TrapFrame};
+use crate::{
+    mm::page_table::{PageTable, PhysAddr},
+    task::trapframe::TrapFrame,
+};
 
-#[derive(Clone, PartialEq)]
+pub const USER_HEAP_START: usize = 0x2_0000;
+pub const USER_HEAP_LIMIT: usize = 0x3e00_0000;
+
+#[derive(Clone, Copy, PartialEq)]
 pub enum ProcessState {
     Ready,
     Running,
@@ -17,4 +23,6 @@ pub struct Process {
     pub trap_frame: TrapFrame,
     pub kernel_sp: usize,
     pub kernel_stack_frame: PhysAddr,
+    pub heap_start: usize,
+    pub heap_end: usize,
 }
