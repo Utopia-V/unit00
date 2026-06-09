@@ -2,9 +2,10 @@
 
 use core::arch::asm;
 
-use crate::mm::page_table::{PTEntry, VirtAddr, PTEFlags};
+use crate::mm::page_table::{PTEFlags, PTEntry, VirtAddr};
 use crate::task::process::ProcessState;
 use crate::task::scheduler::{current, reparent_orphans_to_init, schedule, wake_parent};
+use crate::task::trapframe::TrapFrame;
 use crate::{console, sbi};
 
 /// trap_exit_restore 汇编标签的地址，由 rust_main 在 init 时填写
@@ -14,6 +15,12 @@ pub fn init(addr: usize) {
     unsafe {
         asm!("csrw stvec, {}", in(reg) addr);
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn kernel_trap_handler() -> ! {
+    console::puts("\n[KERNEL TRAP]\n");
+    sbi::shutdown();
 }
 
 #[allow(unused)]
@@ -26,7 +33,7 @@ pub fn trigger_breakpoint() {
 #[unsafe(no_mangle)]
 extern "C" fn trap_handler(
     scause: usize,
-    sepc: usize,
+    _sepc: usize,
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -34,21 +41,13 @@ extern "C" fn trap_handler(
     stval: usize,
 ) -> usize {
     // 更新当前进程 TrapFrame，使 syscall（如 fork）能读到正确的寄存器值。
-    // trap frame 位于 kernel_sp - 64，由 trap_entry 汇编填写。
+    // trap frame 位于 kernel_sp - TrapFrame::SIZE，由 trap_entry 汇编填写。
     {
         let proc = current();
-        let frame_base = proc.kernel_sp - 64;
+        let frame_base = proc.kernel_sp - TrapFrame::SIZE;
         unsafe {
-            proc.trap_frame.ra = core::ptr::read(frame_base as *const usize);
-            proc.trap_frame.a0 = core::ptr::read((frame_base + 8) as *const usize);
-            proc.trap_frame.a1 = core::ptr::read((frame_base + 16) as *const usize);
-            proc.trap_frame.a2 = core::ptr::read((frame_base + 24) as *const usize);
-            proc.trap_frame.a7 = core::ptr::read((frame_base + 32) as *const usize);
-            proc.trap_frame.scause = core::ptr::read((frame_base + 40) as *const usize);
-            proc.trap_frame.sepc = sepc; // 直接用参数，不再从栈读
+            proc.trap_frame = TrapFrame::read_from_stack(frame_base);
         }
-        unsafe { asm!("csrr {}, sscratch", out(reg) proc.trap_frame.sp) };
-        unsafe { asm!("csrr {}, sstatus", out(reg) proc.trap_frame.sstatus) };
     }
 
     if scause >> 63 == 1 {
@@ -90,11 +89,14 @@ fn page_fault_handler(scause: usize, stval: usize) -> usize {
     // Store Page Fault: 查 PTE，判断 COW
     let vaddr = VirtAddr(stval);
     let proc = crate::task::scheduler::current();
-    if let Some(entry) = proc.page_table.lookup(vaddr) {
-        if entry.is_cow() && entry.is_r() && !entry.is_w() && entry.is_u() {
-            handle_cow_fault(vaddr, entry);
-            return 0;
-        }
+    if let Some(entry) = proc.page_table.lookup(vaddr)
+        && entry.is_cow()
+        && entry.is_r()
+        && !entry.is_w()
+        && entry.is_u()
+    {
+        handle_cow_fault(vaddr, entry);
+        return 0;
     }
 
     // 非 COW 页面 → 真段错误

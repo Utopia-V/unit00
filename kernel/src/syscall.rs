@@ -63,7 +63,7 @@ pub fn dispatch(syscall_no: usize, arg0: usize, arg1: usize, arg2: usize) -> usi
             // stub: 文件系统就绪后实现 ELF 加载
             let cur = current();
             cur.trap_frame.sepc = 0x10000;
-            cur.trap_frame.sp = 0x3F001000;
+            cur.trap_frame.set_sp(0x3F001000);
             0
         }
         260 => {
@@ -101,7 +101,7 @@ fn sys_fork() -> usize {
     let kernel_sp = kernel_stack.0 + 4096;
 
     let mut child_tf = current().trap_frame;
-    child_tf.a0 = 0;
+    child_tf.set_a0(0);
     child_tf.sepc += 4;
     child_tf.scause = 8;
 

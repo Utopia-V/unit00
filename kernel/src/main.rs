@@ -6,9 +6,9 @@ mod console;
 mod mm;
 mod sbi;
 mod syscall;
+mod task;
 mod timer;
 mod trap;
-mod task;
 
 use crate::mm::frame::{alloc_frame, frame_init};
 use crate::mm::page_table::{PTEFlags, PhysAddr, VirtAddr, init_kernel};
@@ -31,8 +31,7 @@ _start:
     j   1b
 2:
     la   sp, _stack_end
-    la   t0, _stack_start
-    csrw sscratch, t0
+    csrw sscratch, zero
     tail rust_main
     "
 );
@@ -44,90 +43,124 @@ global_asm!(
     .global trap_exit_restore
     .align 4
 trap_entry:
-    // 区分 U-mode trap 还是 S-mode 嵌套 trap
-    csrr t0, sstatus
-    srli t0, t0, 8    // SPP 在 bit 8
-    andi t0, t0, 1
-    bnez  t0, 1f       // SPP=1 → 来自 S-mode，嵌套 trap
+    // sscratch != 0 means U-mode was running and sscratch holds kernel_sp.
+    // sscratch == 0 means the trap came from S-mode; this stage treats it as fatal.
+    csrrw t0, sscratch, t0
+    bnez  t0, 1f
+    csrrw t0, sscratch, t0
+    call  kernel_trap_handler
 
-    // 来自 U-mode：正常路径
-    csrrw sp, sscratch, sp
-    j     2f
+1:
+    addi t0, t0, -288
 
-1:  // 来自 S-mode：嵌套 trap
-    // sp 已经在内核栈上（无需 swap），sscratch 持有用户 sp
-    // 直接继续——不需要 csrrw
+    sd   zero,   0(t0)
+    sd   ra,     8(t0)
+    sd   sp,    16(t0)
+    sd   gp,    24(t0)
+    sd   tp,    32(t0)
+    sd   t1,    48(t0)
+    csrr t1, sscratch
+    sd   t1,    40(t0)
+    sd   t2,    56(t0)
+    sd   s0,    64(t0)
+    sd   s1,    72(t0)
+    sd   a0,    80(t0)
+    sd   a1,    88(t0)
+    sd   a2,    96(t0)
+    sd   a3,   104(t0)
+    sd   a4,   112(t0)
+    sd   a5,   120(t0)
+    sd   a6,   128(t0)
+    sd   a7,   136(t0)
+    sd   s2,   144(t0)
+    sd   s3,   152(t0)
+    sd   s4,   160(t0)
+    sd   s5,   168(t0)
+    sd   s6,   176(t0)
+    sd   s7,   184(t0)
+    sd   s8,   192(t0)
+    sd   s9,   200(t0)
+    sd   s10,  208(t0)
+    sd   s11,  216(t0)
+    sd   t3,   224(t0)
+    sd   t4,   232(t0)
+    sd   t5,   240(t0)
+    sd   t6,   248(t0)
 
-2:
-    addi sp, sp, -64
-    sd   ra,  0(sp)
-    sd   a0,  8(sp)    // 用户 a0
-    sd   a1, 16(sp)    // 用户 a1
-    sd   a2, 24(sp)    // 用户 a2
-    sd   a7, 32(sp)    // 用户 a7
-
-    csrr t0, scause
+    csrr t1, sstatus
+    sd   t1,   256(t0)
     csrr t1, sepc
-    sd   t0, 40(sp)    // 保存 scause
-    sd   t1, 48(sp)    // 保存 sepc
+    sd   t1,   264(t0)
+    csrr t1, scause
+    sd   t1,   272(t0)
+    csrr t1, stval
+    sd   t1,   280(t0)
 
-    csrr t2, stval
-    sd   t2, 56(sp)    // 保存 stval
+    mv   sp, t0
+    csrw sscratch, zero
 
-    mv   a0, t0
-    mv   a1, t1
-    ld   a2,  8(sp)    // 用户 a0 → arg2
-    ld   a3, 16(sp)    // 用户 a1 → arg3
-    ld   a4, 24(sp)    // 用户 a2 → arg4
-    ld   a5, 32(sp)    // 用户 a7 → arg5
-    ld   a6, 56(sp)    // stval -> arg6
+    ld   a0, 272(sp)    // scause
+    ld   a1, 264(sp)    // sepc
+    ld   a2,  80(sp)    // user a0
+    ld   a3,  88(sp)    // user a1
+    ld   a4,  96(sp)    // user a2
+    ld   a5, 136(sp)    // user a7
+    ld   a6, 280(sp)    // stval
 
     call trap_handler
 
     // U-mode ecall? → save return value + sepc += 4
-    ld   t0, 40(sp)    // scause
+    ld   t0, 272(sp)    // scause
     li   t1, 8
     bne  t0, t1, 1f
-    sd   a0,  8(sp)    // dispatch 返回值 → 用户 a0
-    ld   t0, 48(sp)
+    sd   a0,  80(sp)    // dispatch 返回值 → 用户 a0
+    ld   t0, 264(sp)
     addi t0, t0, 4
-    sd   t0, 48(sp)
+    sd   t0, 264(sp)
 1:
-    ld   t0, 48(sp)
-    csrw sepc, t0
-
-    ld   a7, 32(sp)
-    ld   a2, 24(sp)
-    ld   a1, 16(sp)
-    ld   a0,  8(sp)
-    ld   ra,  0(sp)
-    addi sp, sp, 64
-    // 仅当返回 U-mode (SPP=0) 时才做 csrrw
-    csrr t0, sstatus
-    srli t0, t0, 8
-    andi t0, t0, 1
-    bnez  t0, 2f
-    csrrw sp, sscratch, sp
-2:
-    sret
+    j trap_exit_restore
 
     // trap_exit_restore: schedule()/init 入口
 trap_exit_restore:
-    ld   t0, 48(sp)
+    ld   t0, 264(sp)
     csrw sepc, t0
-    ld   a7, 32(sp)
-    ld   a2, 24(sp)
-    ld   a1, 16(sp)
-    ld   a0,  8(sp)
-    ld   ra,  0(sp)
-    addi sp, sp, 64
-    // 仅当返回 U-mode (SPP=0) 时才做 csrrw
-    csrr t0, sstatus
-    srli t0, t0, 8
-    andi t0, t0, 1
-    bnez  t0, 2f
+    ld   t0, 256(sp)
+    csrw sstatus, t0
+    ld   t0,  16(sp)
+    csrw sscratch, t0
+
+    ld   ra,     8(sp)
+    ld   gp,    24(sp)
+    ld   tp,    32(sp)
+    ld   t1,    48(sp)
+    ld   t2,    56(sp)
+    ld   s0,    64(sp)
+    ld   s1,    72(sp)
+    ld   a0,    80(sp)
+    ld   a1,    88(sp)
+    ld   a2,    96(sp)
+    ld   a3,   104(sp)
+    ld   a4,   112(sp)
+    ld   a5,   120(sp)
+    ld   a6,   128(sp)
+    ld   a7,   136(sp)
+    ld   s2,   144(sp)
+    ld   s3,   152(sp)
+    ld   s4,   160(sp)
+    ld   s5,   168(sp)
+    ld   s6,   176(sp)
+    ld   s7,   184(sp)
+    ld   s8,   192(sp)
+    ld   s9,   200(sp)
+    ld   s10,  208(sp)
+    ld   s11,  216(sp)
+    ld   t3,   224(sp)
+    ld   t4,   232(sp)
+    ld   t5,   240(sp)
+    ld   t6,   248(sp)
+    ld   t0,    40(sp)
+    addi sp, sp, 288
     csrrw sp, sscratch, sp
-2:
     sret
     "
 );
@@ -182,7 +215,11 @@ extern "C" fn rust_main() -> ! {
     let kernel_end = PhysAddr(_kernel_end as *const () as usize);
     // 帧分配器从 kernel_end 向上对齐到 4K 之后开始
     frame_init(kernel_end);
-    let (mut pt, satp) = init_kernel(PhysAddr(crate::mm::frame::RAM_BASE), kernel_end, alloc_frame);
+    let (mut pt, satp) = init_kernel(
+        PhysAddr(crate::mm::frame::RAM_BASE),
+        kernel_end,
+        alloc_frame,
+    );
 
     // UART MMIO 区域
     pt.map(
@@ -228,15 +265,17 @@ extern "C" fn rust_main() -> ! {
         crate::trap::TRAP_EXIT_RESTORE_ADDR = trap_exit_restore as *const () as usize;
     }
 
-    // sscratch 设内核 sp——timer 中断在内核态触发时靠它换回正确的栈
+    // sscratch=0 表示当前在内核态；用户态运行时由 trap_exit_restore 写入 kernel_sp。
     unsafe {
-        asm!("csrw sscratch, sp");
+        asm!("csrw sscratch, zero");
     }
     let next = read_time() + 10_000_000;
     set_timer(next);
+    // Enable supervisor timer interrupts at the source, but keep SIE clear
+    // while still in the kernel. The initial TrapFrame sets SPIE so sret
+    // enables interrupts only after entering user mode.
     unsafe {
         asm!("csrs sie, {}", in(reg) 1usize << 5);
-        asm!("csrs sstatus, {}", in(reg) 1usize << 1);
     }
 
     // ── 构造 init Process ──
@@ -252,14 +291,7 @@ extern "C" fn rust_main() -> ! {
         parent_pid: 0, // 哨兵，无父进程
         state: ProcessState::Running,
         page_table: pt,
-        trap_frame: TrapFrame {
-            ra: 0,
-            sp: 0x3F001000,
-            a0: 0, a1: 0, a2: 0, a7: 0,
-            scause: 8,     // 仅作标记
-            sepc: 0x10000, // 用户程序入口
-            sstatus: 0,    // SPP=0 → sret 到 U-mode
-        },
+        trap_frame: TrapFrame::new_user(0x10000, 0x3F001000),
         kernel_sp,
         kernel_stack_frame: kernel_stack,
     };
@@ -271,21 +303,19 @@ extern "C" fn rust_main() -> ! {
 
     // 手工搭栈 → 跳 trap_exit_restore
     let init = crate::task::scheduler::current();
-    unsafe { asm!("csrw satp, {}", in(reg) init_satp); }
-    unsafe { asm!("sfence.vma"); }
-    unsafe { asm!("csrw sscratch, {}", in(reg) init.trap_frame.sp); }
-    let new_sp = init.kernel_sp - 64;
     unsafe {
-        core::ptr::write(new_sp as *mut usize, init.trap_frame.ra);
-        core::ptr::write((new_sp + 8) as *mut usize, init.trap_frame.a0);
-        core::ptr::write((new_sp + 16) as *mut usize, init.trap_frame.a1);
-        core::ptr::write((new_sp + 24) as *mut usize, init.trap_frame.a2);
-        core::ptr::write((new_sp + 32) as *mut usize, init.trap_frame.a7);
-        core::ptr::write((new_sp + 40) as *mut usize, init.trap_frame.scause);
-        core::ptr::write((new_sp + 48) as *mut usize, init.trap_frame.sepc);
+        asm!("csrw satp, {}", in(reg) init_satp);
     }
-    unsafe { asm!("mv sp, {}", in(reg) new_sp); }
-    unsafe { asm!("csrw sstatus, {}", in(reg) init.trap_frame.sstatus); }
+    unsafe {
+        asm!("sfence.vma");
+    }
+    let new_sp = init.kernel_sp - TrapFrame::SIZE;
+    unsafe {
+        init.trap_frame.write_to_stack(new_sp);
+    }
+    unsafe {
+        asm!("mv sp, {}", in(reg) new_sp);
+    }
     let addr = unsafe { crate::trap::TRAP_EXIT_RESTORE_ADDR };
     unsafe {
         asm!("jr {}", in(reg) addr, options(noreturn));
@@ -299,4 +329,3 @@ unsafe extern "C" {
     fn user_prog_start();
     fn user_prog_end();
 }
-

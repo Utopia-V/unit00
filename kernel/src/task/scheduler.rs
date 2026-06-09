@@ -1,9 +1,11 @@
 use crate::task::process::{Process, ProcessState};
+use crate::task::trapframe::TrapFrame;
 use core::arch::asm;
 
 pub(crate) const MAX_PROCESSES: usize = 32;
 
-pub(crate) static mut PROCESS_LIST: [Option<Process>; MAX_PROCESSES] = [const { None }; MAX_PROCESSES];
+pub(crate) static mut PROCESS_LIST: [Option<Process>; MAX_PROCESSES] =
+    [const { None }; MAX_PROCESSES];
 
 pub(crate) static mut CURRENT: usize = 0;
 static mut NEXT_PID: usize = 1;
@@ -48,10 +50,11 @@ pub fn reparent_orphans_to_init() {
     for i in 0..MAX_PROCESSES {
         unsafe {
             let slot = &mut *ptr.add(i);
-            if let Some(ref mut proc) = *slot {
-                if proc.parent_pid == cur_pid && proc.state != ProcessState::Gone {
-                    proc.parent_pid = 1;
-                }
+            if let Some(proc) = slot.as_mut()
+                && proc.parent_pid == cur_pid
+                && proc.state != ProcessState::Gone
+            {
+                proc.parent_pid = 1;
             }
         }
     }
@@ -65,11 +68,12 @@ pub fn wake_parent() {
     for i in 0..MAX_PROCESSES {
         unsafe {
             let slot = &mut *ptr.add(i);
-            if let Some(ref mut proc) = *slot {
-                if proc.pid == parent_pid && proc.state == ProcessState::Blocked {
-                    proc.state = ProcessState::Ready;
-                    break;
-                }
+            if let Some(proc) = slot.as_mut()
+                && proc.pid == parent_pid
+                && proc.state == ProcessState::Blocked
+            {
+                proc.state = ProcessState::Ready;
+                break;
             }
         }
     }
@@ -83,10 +87,11 @@ fn pick_next() -> usize {
     for i in 1..=MAX_PROCESSES {
         let idx = (cur + i) % MAX_PROCESSES;
         unsafe {
-            if let Some(ref proc) = *ptr.add(idx) {
-                if proc.state == ProcessState::Ready {
-                    return idx;
-                }
+            let slot = &*ptr.add(idx);
+            if let Some(proc) = slot.as_ref()
+                && proc.state == ProcessState::Ready
+            {
+                return idx;
             }
         }
     }
@@ -100,22 +105,12 @@ fn pick_next() -> usize {
 pub fn schedule() -> ! {
     // 1. 保存当前进程上下文
     let cur = current();
-    // trap frame 固定在 kernel_sp - 64（由 trap_entry 写入），
+    // trap frame 固定在 kernel_sp - TrapFrame::SIZE（由 trap_entry 写入），
     // 不能用当前 sp，因为 schedule() 调用链中 sp 早已离开该位置。
-    let frame_base = cur.kernel_sp - 64;
+    let frame_base = cur.kernel_sp - TrapFrame::SIZE;
     unsafe {
-        cur.trap_frame.ra = core::ptr::read(frame_base as *const usize);
-        cur.trap_frame.a0 = core::ptr::read((frame_base + 8) as *const usize);
-        cur.trap_frame.a1 = core::ptr::read((frame_base + 16) as *const usize);
-        cur.trap_frame.a2 = core::ptr::read((frame_base + 24) as *const usize);
-        cur.trap_frame.a7 = core::ptr::read((frame_base + 32) as *const usize);
-        cur.trap_frame.scause = core::ptr::read((frame_base + 40) as *const usize);
-        cur.trap_frame.sepc = core::ptr::read((frame_base + 48) as *const usize);
+        cur.trap_frame = TrapFrame::read_from_stack(frame_base);
     }
-    // 从 sscratch 读用户 sp（trap 期间 sscratch 持有用户 sp）
-    unsafe { asm!("csrr {}, sscratch", out(reg) cur.trap_frame.sp) };
-    // 从 sstatus 读 SPP 位
-    unsafe { asm!("csrr {}, sstatus", out(reg) cur.trap_frame.sstatus) };
 
     // 2. 选新进程
     let next_idx = pick_next();
@@ -130,17 +125,11 @@ pub fn schedule() -> ! {
 
     // 提前读出所有需要的值（mv sp 之后不能再访问 Rust 局部变量）
     let next_satp = next.page_table.satp_val();
-    let new_sp = next.kernel_sp - 64;
-    let user_sp = next.trap_frame.sp;
-    let sstatus = next.trap_frame.sstatus;
-    let ra   = next.trap_frame.ra;
-    let a0   = next.trap_frame.a0;
-    let a1   = next.trap_frame.a1;
-    let a2   = next.trap_frame.a2;
-    let a7   = next.trap_frame.a7;
-    let scause = next.trap_frame.scause;
-    let sepc = next.trap_frame.sepc;
+    let new_sp = next.kernel_sp - TrapFrame::SIZE;
     let restore_addr = unsafe { crate::trap::TRAP_EXIT_RESTORE_ADDR };
+    unsafe {
+        next.trap_frame.write_to_stack(new_sp);
+    }
 
     // 切页表、写 trap frame、切换 sscratch/sp/sstatus、跳转 ——
     // 全部放在一个 asm 块里。mv sp 之后编译器不能再插入任何指令。
@@ -148,28 +137,10 @@ pub fn schedule() -> ! {
         asm!(
             "csrw satp, {next_satp}",
             "sfence.vma",
-            "sd   {ra},  0({new_sp})",
-            "sd   {a0},  8({new_sp})",
-            "sd   {a1}, 16({new_sp})",
-            "sd   {a2}, 24({new_sp})",
-            "sd   {a7}, 32({new_sp})",
-            "sd   {scause}, 40({new_sp})",
-            "sd   {sepc}, 48({new_sp})",
-            "csrw sscratch, {user_sp}",
             "mv   sp, {new_sp}",
-            "csrw sstatus, {sstatus}",
             "jr   {restore_addr}",
             next_satp = in(reg) next_satp,
             new_sp = in(reg) new_sp,
-            user_sp = in(reg) user_sp,
-            ra = in(reg) ra,
-            a0 = in(reg) a0,
-            a1 = in(reg) a1,
-            a2 = in(reg) a2,
-            a7 = in(reg) a7,
-            scause = in(reg) scause,
-            sepc = in(reg) sepc,
-            sstatus = in(reg) sstatus,
             restore_addr = in(reg) restore_addr,
             options(noreturn),
         );
