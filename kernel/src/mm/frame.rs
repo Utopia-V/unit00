@@ -13,7 +13,17 @@ static mut FRAME_REFS: [AtomicU32; 32768] = unsafe { core::mem::zeroed() };
 static FREE_LIST_HEAD: AtomicU64 = AtomicU64::new(0);
 
 fn frame_index(pa: PhysAddr) -> usize {
+    if !is_managed(pa) {
+        crate::console::puts("\n[FRAME] bad pa=0x");
+        crate::trap::print_hex(pa.0);
+        crate::console::puts("\n");
+        panic!("frame_index: physical address out of managed RAM");
+    }
     (pa.0 - RAM_BASE) >> 12
+}
+
+fn is_managed(pa: PhysAddr) -> bool {
+    pa.0 >= RAM_BASE && pa.0 < RAM_BASE + RAM_SIZE
 }
 
 pub fn inc_ref(pa: PhysAddr) {
@@ -75,4 +85,28 @@ pub fn alloc_frame() -> Option<PhysAddr> {
         }
         Some(pa)
     }
+}
+
+pub fn alloc_contiguous_frames(pages: usize) -> Option<PhysAddr> {
+    if pages == 0 {
+        return None;
+    }
+    let bytes = pages.checked_mul(4096)?;
+    let start = unsafe { NEXT_FRAME };
+    let end = start.checked_add(bytes)?;
+    if end > RAM_BASE + RAM_SIZE {
+        return None;
+    }
+
+    unsafe {
+        NEXT_FRAME = end;
+    }
+    for i in 0..pages {
+        let pa = PhysAddr(start + i * 4096);
+        let idx = frame_index(pa);
+        unsafe {
+            FRAME_REFS[idx].store(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    Some(PhysAddr(start))
 }

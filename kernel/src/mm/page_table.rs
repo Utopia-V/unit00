@@ -253,6 +253,9 @@ impl PageTable {
                         if !l1_entry.is_valid() {
                             continue;
                         }
+                        if !l1_entry.is_r() && !l1_entry.is_w() && !l1_entry.is_x() {
+                            continue;
+                        }
                         let vaddr = VirtAddr((vpn2 << 30) | (vpn1 << 21) | (vpn0 << 12));
                         callback(vaddr, l1_entry);
                     }
@@ -262,21 +265,24 @@ impl PageTable {
     }
 
     /// 把一个虚拟页映射到一个物理页
-    pub fn map(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags) {
-        self.map_leaf(vaddr, paddr, flags, false);
+    pub fn map(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags) -> bool {
+        self.map_leaf(vaddr, paddr, flags, false)
     }
 
     /// 映射一个 COW 叶子页。COW 位在 PTE 高位，不能放进 PTEFlags。
-    pub fn map_cow(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags) {
-        self.map_leaf(vaddr, paddr, flags, true);
+    pub fn map_cow(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags) -> bool {
+        self.map_leaf(vaddr, paddr, flags, true)
     }
 
-    fn map_leaf(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags, cow: bool) {
+    fn map_leaf(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: PTEFlags, cow: bool) -> bool {
         if let Some(entry) = self.walk(vaddr) {
             *entry = PTEntry::new_leaf(paddr, flags);
             if cow {
                 entry.set_cow();
             }
+            true
+        } else {
+            false
         }
     }
 

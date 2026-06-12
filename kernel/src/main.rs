@@ -10,11 +10,14 @@ mod task;
 mod timer;
 mod trap;
 
-use crate::mm::frame::{alloc_frame, frame_init};
+use crate::mm::frame::{alloc_contiguous_frames, alloc_frame, frame_init};
 use crate::mm::page_table::{PTEFlags, PhysAddr, VirtAddr, init_kernel};
 use crate::timer::{read_time, set_timer};
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
+
+const PAGE_SIZE: usize = 4096;
+const USER_CODE_BASE: usize = 0x1_0000;
 
 global_asm!(
     "
@@ -353,6 +356,65 @@ user_prog_start:
     li   t0, 0x20000
     bne  a0, t0, sys_fail
 
+    li   a7, 222        // mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    li   a0, 0
+    li   a1, 8192
+    li   a2, 3
+    li   a3, 0x22
+    li   a4, -1
+    li   a5, 0
+    ecall
+    li   t0, 0x3e000000
+    bne  a0, t0, sys_fail
+    mv   s0, a0
+    li   t1, 0x66
+    sb   t1, 0(s0)
+    lb   t2, 0(s0)
+    bne  t1, t2, sys_fail
+    li   t1, 0x77
+    li   t0, 4096
+    add  t0, s0, t0
+    sb   t1, 0(t0)
+    lb   t2, 0(t0)
+    bne  t1, t2, sys_fail
+
+    li   a7, 215        // munmap(first page)
+    mv   a0, s0
+    li   a1, 4096
+    ecall
+    bnez a0, sys_fail
+    li   t0, 4096       // second page remains mapped after prefix unmap
+    add  t0, s0, t0
+    li   t1, 0x55
+    sb   t1, 0(t0)
+    lb   t2, 0(t0)
+    bne  t1, t2, sys_fail
+
+    li   a7, 215        // munmap(second page)
+    li   t0, 4096
+    add  a0, s0, t0
+    li   a1, 4096
+    ecall
+    bnez a0, sys_fail
+
+    li   a7, 215        // unaligned munmap -> -EINVAL
+    addi a0, s0, 1
+    li   a1, 4096
+    ecall
+    li   t0, -22
+    bne  a0, t0, sys_fail
+
+    li   a7, 222        // file-backed mmap unsupported -> -ENOSYS
+    li   a0, 0
+    li   a1, 4096
+    li   a2, 3
+    li   a3, 0x2
+    li   a4, -1
+    li   a5, 0
+    ecall
+    li   t0, -38
+    bne  a0, t0, sys_fail
+
     addi sp, sp, 512
 
     // fork()
@@ -416,6 +478,8 @@ fn panic(info: &PanicInfo) -> ! {
     if let Some(loc) = info.location() {
         console::puts(" at ");
         console::puts(loc.file());
+        console::puts(":0x");
+        trap::print_hex(loc.line() as usize);
     }
     console::puts("\n");
     sbi::shutdown();
@@ -441,22 +505,32 @@ extern "C" fn rust_main() -> ! {
         PTEFlags::new(true, true, false, false),
     );
 
-    // 用户代码页：分配物理页、拷贝程序、映射到 0x1_0000
-    let code_page = alloc_frame().expect("no frame for user code");
+    // 用户代码：按实际大小分配并映射，避免内置 smoke 变长后溢出单页。
     let prog_start = user_prog_start as *const () as usize;
     let prog_end = user_prog_end as *const () as usize;
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            prog_start as *const u8,
-            code_page.0 as *mut u8,
-            prog_end - prog_start,
+    let prog_len = prog_end - prog_start;
+    let mapped_len = (prog_len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    assert!(USER_CODE_BASE + mapped_len <= crate::task::process::USER_HEAP_START);
+
+    let mut copied = 0;
+    while copied < prog_len {
+        let code_page = alloc_frame().expect("no frame for user code");
+        unsafe {
+            core::ptr::write_bytes(code_page.0 as *mut u8, 0, PAGE_SIZE);
+            let chunk = core::cmp::min(PAGE_SIZE, prog_len - copied);
+            core::ptr::copy_nonoverlapping(
+                (prog_start + copied) as *const u8,
+                code_page.0 as *mut u8,
+                chunk,
+            );
+        }
+        pt.map(
+            VirtAddr(USER_CODE_BASE + copied),
+            code_page,
+            PTEFlags::new(true, false, true, true), // R+X, U=1
         );
+        copied += PAGE_SIZE;
     }
-    pt.map(
-        VirtAddr(0x1_0000),
-        code_page,
-        PTEFlags::new(true, false, true, true), // R+X, U=1
-    );
 
     // 用户栈页：映射到 0x3F00_0000（VPN[2]=0，< KERNEL_VPN2_MIN）
     let stack_page = alloc_frame().expect("no frame for user stack");
@@ -492,11 +566,18 @@ extern "C" fn rust_main() -> ! {
     }
 
     // ── 构造 init Process ──
-    use crate::task::process::{Process, ProcessState, USER_HEAP_START};
+    use crate::task::process::{
+        KERNEL_STACK_PAGES, KERNEL_STACK_SIZE, MAX_MMAP_AREAS, MmapArea, Process, ProcessState,
+        USER_HEAP_START,
+    };
     use crate::task::trapframe::TrapFrame;
 
-    let kernel_stack = alloc_frame().expect("no frame for init kernel stack");
-    let kernel_sp = kernel_stack.0 + 4096;
+    let kernel_stack =
+        alloc_contiguous_frames(KERNEL_STACK_PAGES).expect("no frames for init kernel stack");
+    unsafe {
+        core::ptr::write_bytes(kernel_stack.0 as *mut u8, 0, KERNEL_STACK_SIZE);
+    }
+    let kernel_sp = kernel_stack.0 + KERNEL_STACK_SIZE;
     let init_satp = pt.satp_val();
 
     let init = Process {
@@ -504,11 +585,12 @@ extern "C" fn rust_main() -> ! {
         parent_pid: 0, // 哨兵，无父进程
         state: ProcessState::Running,
         page_table: pt,
-        trap_frame: TrapFrame::new_user(0x10000, 0x3F001000),
+        trap_frame: TrapFrame::new_user(USER_CODE_BASE, 0x3F001000),
         kernel_sp,
         kernel_stack_frame: kernel_stack,
         heap_start: USER_HEAP_START,
         heap_end: USER_HEAP_START,
+        mmap_areas: [MmapArea::EMPTY; MAX_MMAP_AREAS],
     };
 
     unsafe {
@@ -528,12 +610,15 @@ extern "C" fn rust_main() -> ! {
     unsafe {
         init.trap_frame.write_to_stack(new_sp);
     }
-    unsafe {
-        asm!("mv sp, {}", in(reg) new_sp);
-    }
     let addr = unsafe { crate::trap::TRAP_EXIT_RESTORE_ADDR };
     unsafe {
-        asm!("jr {}", in(reg) addr, options(noreturn));
+        asm!(
+            "mv sp, {new_sp}",
+            "jr {addr}",
+            new_sp = in(reg) new_sp,
+            addr = in(reg) addr,
+            options(noreturn),
+        );
     }
 }
 

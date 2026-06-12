@@ -19,7 +19,26 @@ pub fn init(addr: usize) {
 
 #[unsafe(no_mangle)]
 extern "C" fn kernel_trap_handler() -> ! {
+    let scause: usize;
+    let sepc: usize;
+    let stval: usize;
+    let sstatus: usize;
+    unsafe {
+        asm!("csrr {}, scause", out(reg) scause);
+        asm!("csrr {}, sepc", out(reg) sepc);
+        asm!("csrr {}, stval", out(reg) stval);
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+    }
     console::puts("\n[KERNEL TRAP]\n");
+    console::puts(" scause=0x");
+    print_hex(scause);
+    console::puts(" sepc=0x");
+    print_hex(sepc);
+    console::puts(" stval=0x");
+    print_hex(stval);
+    console::puts(" sstatus=0x");
+    print_hex(sstatus);
+    console::puts("\n");
     sbi::shutdown();
 }
 
@@ -34,10 +53,10 @@ pub fn trigger_breakpoint() {
 extern "C" fn trap_handler(
     scause: usize,
     _sepc: usize,
-    arg0: usize,
-    arg1: usize,
-    arg2: usize,
-    syscall_no: usize,
+    _arg0: usize,
+    _arg1: usize,
+    _arg2: usize,
+    _syscall_no: usize,
     stval: usize,
 ) -> usize {
     // 更新当前进程 TrapFrame，使 syscall（如 fork）能读到正确的寄存器值。
@@ -65,7 +84,20 @@ extern "C" fn trap_handler(
     } else {
         // 异常
         match scause {
-            8 => crate::syscall::dispatch(syscall_no, arg0, arg1, arg2),
+            8 => {
+                let tf = current().trap_frame;
+                crate::syscall::dispatch(
+                    tf.regs[17],
+                    [
+                        tf.regs[10],
+                        tf.regs[11],
+                        tf.regs[12],
+                        tf.regs[13],
+                        tf.regs[14],
+                        tf.regs[15],
+                    ],
+                )
+            }
             12 | 13 | 15 => page_fault_handler(scause, stval),
             _ => {
                 console::puts("\n[TRAP]\n scause: 0x");
